@@ -1,6 +1,6 @@
 #!/bin/bash
 # WordPress Auto Install Script for Ubuntu 22.04
-# Author: ChatGPT (Modified with port check & domain prompt)
+# Author: ChatGPT (Final Version with DNS check, firewall auto-enable)
 # Log File
 LOG_FILE="/var/log/wordpress-install.log"
 exec > >(tee -i $LOG_FILE)
@@ -11,10 +11,45 @@ GREEN='\033[0;32m'
 RED='\033[0;31m'
 NC='\033[0m'
 
-# --- 1) پرسیدن دامنه از کاربر ---
+# --- 1) پرسیدن دامنه ---
 read -rp "Enter your domain (e.g., example.com): " DOMAIN
 
-# --- 2) بررسی و باز کردن پورت‌ها ---
+# --- 2) چک کردن اتصال دامنه به IP سرور ---
+SERVER_IP=$(hostname -I | awk '{print $1}')
+DOMAIN_IP=$(dig +short $DOMAIN A | tail -n 1)
+
+if [ -z "$DOMAIN_IP" ]; then
+    echo -e "${RED}[!] Domain $DOMAIN does not have a valid A record.${NC}"
+    read -rp "Do you want to continue anyway? (y/n): " CONTINUE
+    if [[ ! $CONTINUE =~ ^[Yy]$ ]]; then
+        echo "Installation aborted. Please fix your DNS settings first."
+        exit 1
+    fi
+else
+    if [ "$SERVER_IP" != "$DOMAIN_IP" ]; then
+        echo -e "${RED}[!] Warning: Domain $DOMAIN points to $DOMAIN_IP, but your server IP is $SERVER_IP.${NC}"
+        read -rp "Continue installation? (y/n): " CONTINUE
+        if [[ ! $CONTINUE =~ ^[Yy]$ ]]; then
+            echo "Installation aborted. Please fix your DNS settings first."
+            exit 1
+        fi
+    else
+        echo -e "${GREEN}[+] Domain $DOMAIN is correctly pointed to this server.${NC}"
+    fi
+fi
+
+# --- 3) نصب و فعال‌سازی ufw در صورت نبود ---
+if ! command -v ufw &>/dev/null; then
+    echo "[!] ufw not found. Installing ufw..."
+    apt update && apt install ufw -y
+fi
+
+if ! sudo ufw status | grep -q "Status: active"; then
+    echo "[!] ufw is not active. Enabling ufw..."
+    sudo ufw enable
+fi
+
+# --- 4) چک کردن و باز کردن پورت‌ها ---
 check_and_open_port() {
   local port=$1
   if ! sudo ufw status | grep -qw "$port"; then
@@ -30,25 +65,23 @@ check_and_open_port() {
 check_and_open_port 80
 check_and_open_port 443
 
-# --- 3) بروزرسانی سیستم ---
+# --- 5) بروزرسانی سیستم ---
 echo -e "${GREEN}[+] Updating system...${NC}"
 apt update && apt upgrade -y
 
-# --- 4) نصب Apache, MySQL, PHP ---
+# --- 6) نصب Apache, MySQL, PHP ---
 echo -e "${GREEN}[+] Installing Apache, MySQL, PHP...${NC}"
-apt install apache2 mysql-server php php-mysql libapache2-mod-php php-cli php-curl php-gd php-xml php-mbstring unzip curl wget -y
+apt install apache2 mysql-server php php-mysql libapache2-mod-php php-cli php-curl php-gd php-xml php-mbstring unzip curl wget dnsutils -y
 
-# فعال کردن سرویس‌ها
 systemctl enable apache2
 systemctl enable mysql
 systemctl start apache2
 systemctl start mysql
 
-# --- 5) تنظیم MySQL ---
+# --- 7) تنظیم MySQL ---
 MYSQL_ROOT_PASS=$(openssl rand -base64 12)
 echo "ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY '$MYSQL_ROOT_PASS'; FLUSH PRIVILEGES;" | mysql -u root
 
-# دیتابیس و یوزر
 DB_NAME=wp_$(openssl rand -hex 3)
 DB_USER=wpuser_$(openssl rand -hex 3)
 DB_PASS=$(openssl rand -base64 12)
@@ -57,24 +90,22 @@ mysql -u root -p$MYSQL_ROOT_PASS -e "CREATE DATABASE $DB_NAME;"
 mysql -u root -p$MYSQL_ROOT_PASS -e "CREATE USER '$DB_USER'@'localhost' IDENTIFIED BY '$DB_PASS';"
 mysql -u root -p$MYSQL_ROOT_PASS -e "GRANT ALL PRIVILEGES ON $DB_NAME.* TO '$DB_USER'@'localhost'; FLUSH PRIVILEGES;"
 
-# --- 6) دانلود و تنظیم وردپرس ---
+# --- 8) دانلود و تنظیم وردپرس ---
 echo -e "${GREEN}[+] Downloading WordPress...${NC}"
 wget https://wordpress.org/latest.zip -O /tmp/wordpress.zip
 unzip /tmp/wordpress.zip -d /tmp/
 rm -rf /var/www/$DOMAIN
 mv /tmp/wordpress /var/www/$DOMAIN
 
-# پیکربندی وردپرس
 cp /var/www/$DOMAIN/wp-config-sample.php /var/www/$DOMAIN/wp-config.php
 sed -i "s/database_name_here/$DB_NAME/" /var/www/$DOMAIN/wp-config.php
 sed -i "s/username_here/$DB_USER/" /var/www/$DOMAIN/wp-config.php
 sed -i "s/password_here/$DB_PASS/" /var/www/$DOMAIN/wp-config.php
 
-# دسترسی‌ها
 chown -R www-data:www-data /var/www/$DOMAIN
 chmod -R 755 /var/www/$DOMAIN
 
-# --- 7) ساخت Virtual Host برای Apache ---
+# --- 9) ساخت Virtual Host ---
 cat <<EOF >/etc/apache2/sites-available/$DOMAIN.conf
 <VirtualHost *:80>
     ServerName $DOMAIN
@@ -91,25 +122,22 @@ a2ensite $DOMAIN.conf
 a2enmod rewrite
 systemctl reload apache2
 
-# --- 8) نصب SSL با Certbot ---
+# --- 10) نصب SSL با Certbot ---
 apt install certbot python3-certbot-apache -y
 certbot --apache -d $DOMAIN --non-interactive --agree-tos -m admin@$DOMAIN || echo "[!] SSL installation failed, check logs."
 
-# --- 9) ساخت اطلاعات ورود ادمین ---
+# --- 11) اطلاعات ورود ادمین ---
 WP_ADMIN_USER="admin_$(openssl rand -hex 2)"
 WP_ADMIN_PASS=$(openssl rand -base64 12)
 WP_ADMIN_EMAIL="admin@$DOMAIN"
 
-# --- 10) نصب WP-CLI ---
 curl -O https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar
 chmod +x wp-cli.phar
 mv wp-cli.phar /usr/local/bin/wp
 
-# نصب وردپرس با WP-CLI
 cd /var/www/$DOMAIN || exit
 sudo -u www-data wp core install --url="https://$DOMAIN" --title="My WordPress Site" --admin_user="$WP_ADMIN_USER" --admin_password="$WP_ADMIN_PASS" --admin_email="$WP_ADMIN_EMAIL"
 
-# --- 11) اطلاعات پایانی ---
 echo -e "${GREEN}==========================================${NC}"
 echo -e "${GREEN} WordPress installation completed successfully!${NC}"
 echo -e "Site URL: https://$DOMAIN"
