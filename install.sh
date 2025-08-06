@@ -2,7 +2,7 @@
 
 # =========================
 # WordPress Auto Installer
-# Version: Final Release
+# Version: Updated with Music & Upload Center
 # Author: ashkanr66
 # =========================
 
@@ -51,8 +51,8 @@ fi
 # --- Update system ---
 apt update && apt upgrade -y
 
-# --- Install Apache, MySQL, PHP ---
-apt install -y apache2 mysql-server php php-mysql libapache2-mod-php php-cli unzip curl wget
+# --- Install required packages ---
+apt install -y apache2 mysql-server php php-mysql libapache2-mod-php php-cli unzip curl wget php-curl php-xml php-mbstring php-zip php-gd php-bcmath php-intl php-soap php-imagick certbot python3-certbot-apache
 
 # --- Enable Apache and MySQL ---
 systemctl enable apache2
@@ -61,13 +61,13 @@ systemctl start apache2
 systemctl start mysql
 
 # --- Secure MySQL installation ---
-MYSQL_ROOT_PASSWORD=$(openssl rand -base64 12)
+MYSQL_ROOT_PASSWORD=$(openssl rand -base64 16)
 mysql -e "ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY '$MYSQL_ROOT_PASSWORD'; FLUSH PRIVILEGES;"
 
 # --- Create Database and User ---
 DB_NAME="wp_$(openssl rand -hex 3)"
 DB_USER="wpuser_$(openssl rand -hex 3)"
-DB_PASS=$(openssl rand -base64 12)
+DB_PASS=$(openssl rand -base64 16)
 
 mysql -uroot -p"$MYSQL_ROOT_PASSWORD" -e "CREATE DATABASE $DB_NAME;"
 mysql -uroot -p"$MYSQL_ROOT_PASSWORD" -e "CREATE USER '$DB_USER'@'localhost' IDENTIFIED BY '$DB_PASS';"
@@ -98,6 +98,7 @@ cat <<EOF >/etc/apache2/sites-available/$DOMAIN.conf
     DocumentRoot /var/www/$DOMAIN
     <Directory /var/www/$DOMAIN>
         AllowOverride All
+        Require all granted
     </Directory>
     ErrorLog \${APACHE_LOG_DIR}/$DOMAIN-error.log
     CustomLog \${APACHE_LOG_DIR}/$DOMAIN-access.log combined
@@ -106,24 +107,39 @@ EOF
 
 a2ensite $DOMAIN.conf
 a2enmod rewrite
-systemctl restart apache2
+systemctl reload apache2
 
-# --- Install Certbot and issue SSL ---
-apt install -y certbot python3-certbot-apache
-certbot --apache -d $DOMAIN -d www.$DOMAIN --non-interactive --agree-tos -m admin@$DOMAIN
+# --- Obtain SSL Certificate ---
+certbot --apache -d $DOMAIN -d www.$DOMAIN --non-interactive --agree-tos -m admin@$DOMAIN || {
+    echo -e "${YELLOW}Warning: SSL certificate issuance failed. You can try running certbot manually later.${NC}"
+}
 
-# --- Generate random admin credentials ---
-WP_ADMIN_USER="admin_$(openssl rand -hex 2)"
-WP_ADMIN_PASS=$(openssl rand -base64 12)
-
-# --- Setup WordPress via WP-CLI ---
+# --- Install WP-CLI ---
 curl -O https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar
 chmod +x wp-cli.phar
 mv wp-cli.phar /usr/local/bin/wp
 
-sudo -u www-data wp core install --path="/var/www/$DOMAIN" --url="https://$DOMAIN" --title="My WordPress Site" --admin_user="$WP_ADMIN_USER" --admin_password="$WP_ADMIN_PASS" --admin_email="admin@$DOMAIN"
+# --- Generate random admin credentials ---
+WP_ADMIN_USER="admin_$(openssl rand -hex 2)"
+WP_ADMIN_PASS=$(openssl rand -base64 16)
 
-# --- Display Information ---
+# --- Install WordPress with WP-CLI ---
+sudo -u www-data wp core install --path="/var/www/$DOMAIN" --url="https://$DOMAIN" --title="My Music Site" --admin_user="$WP_ADMIN_USER" --admin_password="$WP_ADMIN_PASS" --admin_email="admin@$DOMAIN"
+
+# --- Install and activate music-related plugins ---
+sudo -u www-data wp plugin install audioigniter --activate
+sudo -u www-data wp plugin install video-player --activate
+sudo -u www-data wp plugin install filebird --activate
+sudo -u www-data wp plugin install increase-max-upload-file-size --activate
+
+# --- Increase upload limits in PHP ---
+PHP_INI="/etc/php/$(php -r 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;')/apache2/php.ini"
+sed -i "s/upload_max_filesize = .*/upload_max_filesize = 1024M/" $PHP_INI
+sed -i "s/post_max_size = .*/post_max_size = 1024M/" $PHP_INI
+sed -i "s/memory_limit = .*/memory_limit = 1024M/" $PHP_INI
+systemctl restart apache2
+
+# --- Final info display ---
 clear
 echo -e "${GREEN}=========================================="
 echo " WordPress installation completed successfully!"
