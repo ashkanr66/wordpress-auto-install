@@ -81,7 +81,8 @@ This project is licensed under the MIT License. See the [LICENSE](LICENSE) file 
 
 ## Contact
 
-For any issues or suggestions, please open an issue on the GitHub repository or contact me at **admin@yourdomain.com**.
+For any issues or suggestions, please open an issue on the [GitHub Repository](https://github.com/ashkanr66/wordpress-auto-install)  
+or contact me via my GitHub profile: [https://github.com/ashkanr66](https://github.com/ashkanr66)
 
 ---
 
