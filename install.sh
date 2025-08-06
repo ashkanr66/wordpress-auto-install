@@ -1,114 +1,100 @@
 #!/bin/bash
-# WordPress Auto Install Script for Ubuntu 22.04
-# Author: ChatGPT (Final Version with DNS check, firewall auto-enable)
-# Log File
-LOG_FILE="/var/log/wordpress-install.log"
-exec > >(tee -i $LOG_FILE)
-exec 2>&1
+
+# =========================
+# WordPress Auto Installer
+# Version: Final Release
+# Author: ashkanr66
+# =========================
 
 # Colors
-GREEN='\033[0;32m'
-RED='\033[0;31m'
-NC='\033[0m'
+GREEN="\e[32m"
+RED="\e[31m"
+YELLOW="\e[33m"
+NC="\e[0m"
 
-# --- 1) پرسیدن دامنه ---
-read -rp "Enter your domain (e.g., example.com): " DOMAIN
+echo -e "${GREEN}=========================================="
+echo "   WordPress Auto Installer for Ubuntu 22.04"
+echo -e "==========================================${NC}"
 
-# --- 2) چک کردن اتصال دامنه به IP سرور ---
-SERVER_IP=$(hostname -I | awk '{print $1}')
-DOMAIN_IP=$(dig +short $DOMAIN A | tail -n 1)
+# --- Check if running as root ---
+if [ "$EUID" -ne 0 ]; then
+    echo -e "${RED}Please run this script as root or using sudo.${NC}"
+    exit 1
+fi
 
-if [ -z "$DOMAIN_IP" ]; then
-    echo -e "${RED}[!] Domain $DOMAIN does not have a valid A record.${NC}"
-    read -rp "Do you want to continue anyway? (y/n): " CONTINUE
-    if [[ ! $CONTINUE =~ ^[Yy]$ ]]; then
-        echo "Installation aborted. Please fix your DNS settings first."
-        exit 1
+# --- Ask for domain name ---
+read -p "Enter your domain name (e.g., example.com): " DOMAIN
+
+# --- Check domain DNS resolution ---
+SERVER_IP=$(curl -s http://checkip.amazonaws.com)
+DOMAIN_IP=$(dig +short "$DOMAIN" | tail -n 1)
+
+if [ "$DOMAIN_IP" != "$SERVER_IP" ]; then
+    echo -e "${YELLOW}Warning: Your domain IP ($DOMAIN_IP) does not match server IP ($SERVER_IP)."
+    echo -e "Please make sure your domain's DNS is correctly pointing to this server before continuing.${NC}"
+    read -p "Press ENTER to continue anyway or CTRL+C to abort."
+fi
+
+# --- Check and open ports 80 and 443 ---
+for PORT in 80 443; do
+    if ! ss -tuln | grep -q ":$PORT "; then
+        echo -e "${YELLOW}Opening port $PORT...${NC}"
+        ufw allow $PORT/tcp
     fi
-else
-    if [ "$SERVER_IP" != "$DOMAIN_IP" ]; then
-        echo -e "${RED}[!] Warning: Domain $DOMAIN points to $DOMAIN_IP, but your server IP is $SERVER_IP.${NC}"
-        read -rp "Continue installation? (y/n): " CONTINUE
-        if [[ ! $CONTINUE =~ ^[Yy]$ ]]; then
-            echo "Installation aborted. Please fix your DNS settings first."
-            exit 1
-        fi
-    else
-        echo -e "${GREEN}[+] Domain $DOMAIN is correctly pointed to this server.${NC}"
-    fi
+done
+
+# Enable UFW if not enabled
+if ! ufw status | grep -q "Status: active"; then
+    ufw --force enable
 fi
 
-# --- 3) نصب و فعال‌سازی ufw در صورت نبود ---
-if ! command -v ufw &>/dev/null; then
-    echo "[!] ufw not found. Installing ufw..."
-    apt update && apt install ufw -y
-fi
-
-if ! sudo ufw status | grep -q "Status: active"; then
-    echo "[!] ufw is not active. Enabling ufw..."
-    sudo ufw enable
-fi
-
-# --- 4) چک کردن و باز کردن پورت‌ها ---
-check_and_open_port() {
-  local port=$1
-  if ! sudo ufw status | grep -qw "$port"; then
-    echo "[!] Port $port is closed. Opening it..."
-    sudo ufw allow "$port"/tcp
-    sudo ufw reload
-    echo "[+] Port $port opened successfully."
-  else
-    echo "[+] Port $port is already open."
-  fi
-}
-
-check_and_open_port 80
-check_and_open_port 443
-
-# --- 5) بروزرسانی سیستم ---
-echo -e "${GREEN}[+] Updating system...${NC}"
+# --- Update system ---
 apt update && apt upgrade -y
 
-# --- 6) نصب Apache, MySQL, PHP ---
-echo -e "${GREEN}[+] Installing Apache, MySQL, PHP...${NC}"
-apt install apache2 mysql-server php php-mysql libapache2-mod-php php-cli php-curl php-gd php-xml php-mbstring unzip curl wget dnsutils -y
+# --- Install Apache, MySQL, PHP ---
+apt install -y apache2 mysql-server php php-mysql libapache2-mod-php php-cli unzip curl wget
 
+# --- Enable Apache and MySQL ---
 systemctl enable apache2
 systemctl enable mysql
 systemctl start apache2
 systemctl start mysql
 
-# --- 7) تنظیم MySQL ---
-MYSQL_ROOT_PASS=$(openssl rand -base64 12)
-echo "ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY '$MYSQL_ROOT_PASS'; FLUSH PRIVILEGES;" | mysql -u root
+# --- Secure MySQL installation ---
+MYSQL_ROOT_PASSWORD=$(openssl rand -base64 12)
+mysql -e "ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY '$MYSQL_ROOT_PASSWORD'; FLUSH PRIVILEGES;"
 
-DB_NAME=wp_$(openssl rand -hex 3)
-DB_USER=wpuser_$(openssl rand -hex 3)
+# --- Create Database and User ---
+DB_NAME="wp_$(openssl rand -hex 3)"
+DB_USER="wpuser_$(openssl rand -hex 3)"
 DB_PASS=$(openssl rand -base64 12)
 
-mysql -u root -p$MYSQL_ROOT_PASS -e "CREATE DATABASE $DB_NAME;"
-mysql -u root -p$MYSQL_ROOT_PASS -e "CREATE USER '$DB_USER'@'localhost' IDENTIFIED BY '$DB_PASS';"
-mysql -u root -p$MYSQL_ROOT_PASS -e "GRANT ALL PRIVILEGES ON $DB_NAME.* TO '$DB_USER'@'localhost'; FLUSH PRIVILEGES;"
+mysql -uroot -p"$MYSQL_ROOT_PASSWORD" -e "CREATE DATABASE $DB_NAME;"
+mysql -uroot -p"$MYSQL_ROOT_PASSWORD" -e "CREATE USER '$DB_USER'@'localhost' IDENTIFIED BY '$DB_PASS';"
+mysql -uroot -p"$MYSQL_ROOT_PASSWORD" -e "GRANT ALL PRIVILEGES ON $DB_NAME.* TO '$DB_USER'@'localhost'; FLUSH PRIVILEGES;"
 
-# --- 8) دانلود و تنظیم وردپرس ---
-echo -e "${GREEN}[+] Downloading WordPress...${NC}"
-wget https://wordpress.org/latest.zip -O /tmp/wordpress.zip
-unzip /tmp/wordpress.zip -d /tmp/
-rm -rf /var/www/$DOMAIN
-mv /tmp/wordpress /var/www/$DOMAIN
+# --- Download WordPress ---
+cd /tmp
+wget https://wordpress.org/latest.zip
+unzip latest.zip
+rm latest.zip
+mv wordpress /var/www/$DOMAIN
 
+# --- Configure WordPress ---
 cp /var/www/$DOMAIN/wp-config-sample.php /var/www/$DOMAIN/wp-config.php
 sed -i "s/database_name_here/$DB_NAME/" /var/www/$DOMAIN/wp-config.php
 sed -i "s/username_here/$DB_USER/" /var/www/$DOMAIN/wp-config.php
 sed -i "s/password_here/$DB_PASS/" /var/www/$DOMAIN/wp-config.php
 
+# --- Set permissions ---
 chown -R www-data:www-data /var/www/$DOMAIN
 chmod -R 755 /var/www/$DOMAIN
 
-# --- 9) ساخت Virtual Host ---
+# --- Create Apache Virtual Host ---
 cat <<EOF >/etc/apache2/sites-available/$DOMAIN.conf
 <VirtualHost *:80>
     ServerName $DOMAIN
+    ServerAlias www.$DOMAIN
     DocumentRoot /var/www/$DOMAIN
     <Directory /var/www/$DOMAIN>
         AllowOverride All
@@ -120,34 +106,33 @@ EOF
 
 a2ensite $DOMAIN.conf
 a2enmod rewrite
-systemctl reload apache2
+systemctl restart apache2
 
-# --- 10) نصب SSL با Certbot ---
-apt install certbot python3-certbot-apache -y
-certbot --apache -d $DOMAIN --non-interactive --agree-tos -m admin@$DOMAIN || echo "[!] SSL installation failed, check logs."
+# --- Install Certbot and issue SSL ---
+apt install -y certbot python3-certbot-apache
+certbot --apache -d $DOMAIN -d www.$DOMAIN --non-interactive --agree-tos -m admin@$DOMAIN
 
-# --- 11) اطلاعات ورود ادمین ---
+# --- Generate random admin credentials ---
 WP_ADMIN_USER="admin_$(openssl rand -hex 2)"
 WP_ADMIN_PASS=$(openssl rand -base64 12)
-WP_ADMIN_EMAIL="admin@$DOMAIN"
 
+# --- Setup WordPress via WP-CLI ---
 curl -O https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar
 chmod +x wp-cli.phar
 mv wp-cli.phar /usr/local/bin/wp
 
-cd /var/www/$DOMAIN || exit
-sudo -u www-data wp core install --url="https://$DOMAIN" --title="My WordPress Site" --admin_user="$WP_ADMIN_USER" --admin_password="$WP_ADMIN_PASS" --admin_email="$WP_ADMIN_EMAIL"
+sudo -u www-data wp core install --path="/var/www/$DOMAIN" --url="https://$DOMAIN" --title="My WordPress Site" --admin_user="$WP_ADMIN_USER" --admin_password="$WP_ADMIN_PASS" --admin_email="admin@$DOMAIN"
 
-echo -e "${GREEN}==========================================${NC}"
-echo -e "${GREEN} WordPress installation completed successfully!${NC}"
-echo -e "Site URL: https://$DOMAIN"
-echo -e "Admin Panel: https://$DOMAIN/wp-admin"
-echo -e "Admin Username: $WP_ADMIN_USER"
-echo -e "Admin Password: $WP_ADMIN_PASS"
-echo -e "Database Name: $DB_NAME"
-echo -e "Database User: $DB_USER"
-echo -e "Database Password: $DB_PASS"
-echo -e "MySQL Root Password: $MYSQL_ROOT_PASS"
-echo -e "${GREEN}==========================================${NC}"
-
-exit 0
+# --- Display Information ---
+clear
+echo -e "${GREEN}=========================================="
+echo " WordPress installation completed successfully!"
+echo "Site URL: https://$DOMAIN"
+echo "Admin Panel: https://$DOMAIN/wp-admin"
+echo "Admin Username: $WP_ADMIN_USER"
+echo "Admin Password: $WP_ADMIN_PASS"
+echo "Database Name: $DB_NAME"
+echo "Database User: $DB_USER"
+echo "Database Password: $DB_PASS"
+echo "MySQL Root Password: $MYSQL_ROOT_PASSWORD"
+echo -e "==========================================${NC}"
